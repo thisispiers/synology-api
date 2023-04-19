@@ -38,7 +38,7 @@ class FileStation extends Authenticate
      */
     public function getInfo()
     {
-        return $this->_request('Info', 'FileStation/info.cgi', 'getinfo');
+        return $this->_request('Info', 'entry.cgi', 'get');
     }
 
     /**
@@ -57,7 +57,7 @@ class FileStation extends Authenticate
      */
     public function getShares($onlyWritable = false, $limit = 25, $offset = 0, $sortBy = 'name', $sortDirection = 'asc', $additional = false)
     {
-        return $this->_request('List', 'FileStation/file_share.cgi', 'list_share', [
+        return $this->_request('List', 'entry.cgi', 'list_share', [
             'onlywritable'   => $onlyWritable,
             'limit'          => $limit,
             'offset'         => $offset,
@@ -70,28 +70,30 @@ class FileStation extends Authenticate
     /**
      * Get info about an object
      *
-     * @param string $type (List|Sharing)
-     * @param string $id
+     * @param array $paths
      *
      * @return array
      *
      * @throws Exception
      */
-    public function getObjectInfo($type, $id)
+    public function getFileInfo($paths, $additional = null)
     {
-        $path = '';
-        switch ($type) {
-            case 'List':
-                $path = 'FileStation/file_share.cgi';
-                break;
-            case 'Sharing':
-                $path = 'FileStation/file_sharing.cgi';
-                break;
-            default:
-                throw new Exception('Unknown "' . $type . '" object');
+        if (!is_array($paths)) {
+            $paths = [$paths];
         }
-
-        return $this->_request($type, $path, 'getinfo', ['id' => $id]);
+        $additional = array_intersect($additional, [
+            'real_path',
+            'size',
+            'owner',
+            'time',
+            'perm',
+            'mount_point_type',
+            'type',
+        ]);
+        return $this->_request('List', 'entry.cgi', 'getinfo', [
+            'path' => $paths ? '["' . implode('","', $paths) . '"]' : '',
+            'additional' => $additional ? '["' . implode('","', $additional) . '"]' : '',
+        ]);
     }
 
     /**
@@ -111,7 +113,7 @@ class FileStation extends Authenticate
      */
     public function getList($path = '/home', $limit = 25, $offset = 0, $sortBy = 'name', $sortDirection = 'asc', $pattern = '', $fileType = 'all', $additional = false)
     {
-        return $this->_request('List', 'FileStation/file_share.cgi', 'list', [
+        return $this->_request('List', 'entry.cgi', 'list', [
             'folder_path'    => $path,
             'limit'          => $limit,
             'offset'         => $offset,
@@ -140,7 +142,7 @@ class FileStation extends Authenticate
      */
     public function search($pattern, $path = '/home', $limit = 25, $offset = 0, $sortBy = 'name', $sortDirection = 'asc', $fileType = 'all', $additional = false)
     {
-        return $this->_request('List', 'FileStation/file_share.cgi', 'list', [
+        return $this->_request('List', 'entry.cgi', 'list', [
             'folder_path'    => $path,
             'limit'          => $limit,
             'offset'         => $offset,
@@ -162,7 +164,7 @@ class FileStation extends Authenticate
      */
     public function download($path, $mode = 'open')
     {
-        return $this->_request('Download', 'FileStation/file_download.cgi', 'download', [
+        return $this->_request('Download', 'entry.cgi', 'download', [
             'path' => $path,
             'mode' => $mode
         ]);
@@ -170,11 +172,87 @@ class FileStation extends Authenticate
 
     public function createFolder($folder_path, $name, $force_parent = false, $additional = false)
     {
-        return $this->_request('CreateFolder', 'FileStation/file_crtfdr.cgi', 'create', [
+        return $this->_request('CreateFolder', 'entry.cgi', 'create', [
             'folder_path'  => $folder_path,
             'name'         => $name,
             'force_parent' => $force_parent,
             'additional'   => $additional ? 'real_path,size,owner,time,perm' : ''
+        ]);
+    }
+
+    public function upload($path, $content, $create_parents = false, $overwrite = null, $mtime = null, $crtime = null, $atime = null)
+    {
+        $api = 'Upload';
+        $path = 'entry.cgi';
+        $method = 'upload';
+
+        $params = [
+            'path' => $path,
+            'create_parents' => $create_parents,
+            'filename' => new CURLStringFile($content, $path),
+        ];
+        if ($overwrite !== null) { $params['overwrite'] = $overwrite; }
+        if ($mtime !== null) { $params['mtime'] = $mtime; }
+        if ($crtime !== null) { $params['crtime'] = $crtime; }
+        if ($atime !== null) { $params['atime'] = $atime; }
+        $params['api']     = $this->_getApiName($api);
+        $params['version'] = $this->_version;
+        $params['method']  = $method;
+
+        // create a new cURL resource
+        $ch = curl_init();
+
+        $url = $this->_getBaseUrl() . $path;
+        $this->log($url, 'Requested Url');
+        $this->log($params, 'Post Variable');
+
+        //set the url, number of POST vars, POST data
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $params);
+
+        // set URL and other appropriate options
+        curl_setopt($ch, CURLOPT_HEADER, 0);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT_MS, self::CONNECT_TIMEOUT);
+
+        // Verify SSL or not
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $this->_verifySSL ? 2 : 0);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $this->_verifySSL);
+
+        // grab URL and pass it to the browser
+        $result = curl_exec($ch);
+        $info   = curl_getinfo($ch);
+
+        $this->log($info['http_code'], 'Response code');
+        if (200 == $info['http_code']) {
+            if (preg_match('#(plain|text|json)#', $info['content_type'])) {
+                return $this->_parseRequest($api, $path, $result);
+            } else {
+                return $result;
+            }
+        } else {
+            curl_close($ch);
+            if ($info['total_time'] >= (self::CONNECT_TIMEOUT / 1000)) {
+                throw new Exception('Connection Timeout');
+            } else {
+                $this->log($result, 'Result');
+                throw new Exception('Connection Error');
+            }
+        }
+
+        // close cURL resource, and free up system resources
+        curl_close($ch);
+    }
+
+    public function delete($paths, $recursive = false)
+    {
+        if (!is_array($paths)) {
+            $paths = [$paths];
+        }
+        return $this->_request('Delete', 'entry.cgi', 'delete', [
+            'path' => $paths ? '["' . implode('","', $paths) . '"]' : '',
+            'recursive' => $recursive,
         ]);
     }
 }
